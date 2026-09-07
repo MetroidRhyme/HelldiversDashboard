@@ -485,10 +485,11 @@ function buildAllActivePlanetRows(campaigns, totalPlayers) {
     const playerCount = (planet.statistics && planet.statistics.playerCount) ? planet.statistics.playerCount : 0;
     const playerPct = totalPlayers > 0 ? round1(100 * playerCount / totalPlayers) : 0;
     return {
-      index: planet.index, name: asciiSafe(planet.name), faction: progress.faction, percent: progress.percent,
+      index: planet.index, name: asciiSafe(planet.name), sector: asciiSafe(planet.sector), faction: progress.faction, percent: progress.percent,
       playerCount, playerPct,
       resistanceRate: getResistanceRatePctPerHr(planet),
-      trend: getPlanetTrend(planet.index)
+      trend: getPlanetTrend(planet.index),
+      conditionsText: asciiSafe(getPlanetConditionsText(planet))
     };
   });
 }
@@ -731,11 +732,15 @@ function activePlanetRowHtml(row) {
   const factionIcon = iconDataUri(FACTION_ICON_B64[row.faction]);
   const resistanceText = (row.resistanceRate !== null) ? row.resistanceRate + "%/hr resistance" : "resistance unknown";
   const diversText = fmtNum(row.playerCount) + " divers (" + row.playerPct + "% of active)";
+  let detailsText = row.conditionsText || "";
+  if (row.sector) detailsText = row.sector + " sector - " + detailsText;
+  const detailsHtml = detailsText ? '<div class="conditions">' + escapeHtml(detailsText) + '</div>' : "";
   return '<div class="ap-row">' +
     '<div class="row-top">' + badgeHtml(row.faction, factionIcon) + '<span class="row-label">' + escapeHtml(row.name) + '</span><span class="row-pct">' + row.percent + '%</span></div>' +
     barHtml(row.percent, factionColorHex(row.faction), 14) +
     '<div class="ap-meta"><span>' + escapeHtml(diversText) + '</span><span>' + escapeHtml(resistanceText) + '</span></div>' +
     '<div class="ap-status ' + row.trend.cls + '">' + escapeHtml(row.trend.label) + '</div>' +
+    detailsHtml +
     '</div>';
 }
 
