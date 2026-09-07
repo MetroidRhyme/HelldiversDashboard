@@ -39,6 +39,15 @@ h1 { font-size:22px; color:#e8b923; margin:4px 0 2px 0; letter-spacing:0.5px; }
 .enemy-portrait img { width:100%; height:100%; object-fit:cover; }
 .raw-row-top { display:flex; align-items:center; gap:10px; }
 .empty { font-size:14px; color:#9a9aa4; margin:4px 0 0 0; }
+.note { font-size:11.5px; color:#787882; margin:2px 0 14px 0; line-height:1.45; overflow-wrap:break-word; }
+.ap-rows { gap:12px; }
+.ap-row { padding-top:2px; width:100%; }
+.ap-meta { display:flex; justify-content:space-between; gap:8px 14px; font-size:12px; color:#9a9aa4; margin-top:4px; flex-wrap:wrap; }
+.ap-status { font-size:12px; font-weight:600; margin-top:2px; overflow-wrap:break-word; }
+.trend-unknown { color:#787882; font-weight:400; }
+.trend-up { color:#8cc850; }
+.trend-down { color:#d75a5a; }
+.trend-flat { color:#d7a05a; }
 .footer { font-size:11.5px; color:#666670; text-align:center; margin-top:6px; line-height:1.5; overflow-wrap:break-word; }
 .footer a { color:#787882; }
 </style>
@@ -412,6 +421,74 @@ function buildDefendRows(campaigns, excludeIndices, nowUtc) {
   return rows;
 }
 
+// --- Session-local trend memory for the "All Active Planets" section -------
+// This page keeps no server-side history (see the footer note) - the Discord
+// bot's own trend/prognosis reads a real SQLite history it doesn't have
+// here. Instead, each browser tab remembers a short rolling window of what
+// IT has personally observed live (reset on reload/tab close) - enough to
+// answer "is this planet's percent actually moving over the last several
+// minutes", which is all "enough divers to make progress" really needs.
+const PLANET_TREND_WINDOW_MS = 20 * 60 * 1000;      // don't remember further back than this
+const PLANET_TREND_MIN_WINDOW_MS = 4 * 60 * 1000;   // don't trust a rate computed from less than this much real elapsed time - percents are rounded to 0.1, so a 1-2 sample window is mostly rounding noise, not signal
+const PLANET_TREND_EPS_PCT_PER_HR = 0.4;             // +/- this much is "roughly flat", not real gain/loss
+const planetHistory = new Map(); // planet index -> [{t: msEpoch, percent}], oldest first
+
+function recordPlanetHistory(index, percent, nowMs) {
+  let hist = planetHistory.get(index);
+  if (!hist) { hist = []; planetHistory.set(index, hist); }
+  hist.push({ t: nowMs, percent });
+  while (hist.length > 0 && nowMs - hist[0].t > PLANET_TREND_WINDOW_MS) hist.shift();
+}
+
+// Real progress ("+X%/hr") means the current player count is outpacing the
+// planet's own regenPerSecond decay; "~flat" means it roughly isn't - the
+// planet's own resistance is basically absorbing whatever damage divers are
+// currently doing. Both readings use the SAME percent this page already
+// shows (liberate % or defend %, ownership-aware via getPlanetProgress), so
+// "up" always means "the good direction" regardless of mode.
+function getPlanetTrend(index) {
+  const hist = planetHistory.get(index);
+  if (!hist || hist.length < 2) return { label: "gathering data...", cls: "trend-unknown" };
+  const newest = hist[hist.length - 1];
+  const oldest = hist[0];
+  const elapsedMs = newest.t - oldest.t;
+  if (elapsedMs < PLANET_TREND_MIN_WINDOW_MS) return { label: "gathering data...", cls: "trend-unknown" };
+  const hours = elapsedMs / 3600000;
+  const rate = (newest.percent - oldest.percent) / hours;
+  if (rate > PLANET_TREND_EPS_PCT_PER_HR) return { label: "+" + round1(rate) + "%/hr - enough divers", cls: "trend-up" };
+  if (rate < -PLANET_TREND_EPS_PCT_PER_HR) return { label: round1(rate) + "%/hr - losing ground", cls: "trend-down" };
+  return { label: "~flat - not enough divers to outpace resistance", cls: "trend-flat" };
+}
+
+// planet.regenPerSecond is a real, documented API field (health units/sec
+// the planet regenerates on its own, working against whatever damage divers
+// are doing) - converted here to %/hr of the planet's own maxHealth, which
+// reads far more naturally than a raw health-units number.
+function getResistanceRatePctPerHr(planet) {
+  if (!planet.maxHealth || planet.maxHealth <= 0) return null;
+  const regen = (typeof planet.regenPerSecond === "number") ? planet.regenPerSecond : 0;
+  return round1(100 * regen * 3600 / planet.maxHealth);
+}
+
+function buildAllActivePlanetRows(campaigns, totalPlayers) {
+  const rows = campaigns.map(c => {
+    const planet = c.planet;
+    const progress = getPlanetProgress(planet);
+    const playerCount = (planet.statistics && planet.statistics.playerCount) ? planet.statistics.playerCount : 0;
+    const playerPct = totalPlayers > 0 ? round1(100 * playerCount / totalPlayers) : 0;
+    return {
+      name: asciiSafe(planet.name), faction: progress.faction, percent: progress.percent,
+      playerCount, playerPct,
+      resistanceRate: getResistanceRatePctPerHr(planet),
+      trend: getPlanetTrend(planet.index)
+    };
+  });
+  // Busiest fronts (most divers actually there right now) first - the most
+  // actionable ordering for "where is everyone, and is it working".
+  rows.sort((a, b) => b.playerCount - a.playerCount);
+  return rows;
+}
+
 // --- Live API fetch, with the same transient-failure retry behavior as ----
 // --- this project's own Invoke-Hd2Api (lib\common.ps1) - see that -----------
 // --- function's header comment for the reasoning (a couple of quick --------
@@ -498,7 +575,15 @@ async function updateCache(force) {
     const moIndexSet = hasMajorOrder ? majorOrder.orderPlanetIndices : [];
     const defendRows = buildDefendRows(campaigns, moIndexSet, nowUtc);
 
-    cache = { generatedAt: nowUtc, hasMajorOrder, majorOrder, strategicOpportunities, defendRows, totalPlayers };
+    // Record this instant's percent for every currently-active planet BEFORE
+    // building the all-active-planets rows below, so a trend that just
+    // became computable (this poll pushed it past the 4-min minimum window)
+    // shows up in the same render that crossed the threshold.
+    const nowMs = Date.now();
+    campaigns.forEach(c => recordPlanetHistory(c.planet.index, getPlanetProgress(c.planet).percent, nowMs));
+    const allActivePlanetRows = buildAllActivePlanetRows(campaigns, totalPlayers);
+
+    cache = { generatedAt: nowUtc, hasMajorOrder, majorOrder, strategicOpportunities, defendRows, allActivePlanetRows, totalPlayers };
     cacheAtMs = Date.now();
   } catch (e) {
     cacheError = (e && e.message) ? e.message : String(e);
@@ -610,6 +695,30 @@ function defendSectionHtml(defendRows) {
   return '<section class="card"><div class="card-label">PLANETS UNDER ATTACK</div><div class="rows">' + itemsHtml + '</div></section>';
 }
 
+function activePlanetRowHtml(row) {
+  const factionIcon = iconDataUri(FACTION_ICON_B64[row.faction]);
+  const resistanceText = (row.resistanceRate !== null) ? row.resistanceRate + "%/hr resistance" : "resistance unknown";
+  const diversText = fmtNum(row.playerCount) + " divers (" + row.playerPct + "% of active)";
+  return '<div class="ap-row">' +
+    '<div class="row-top">' + badgeHtml(row.faction, factionIcon) + '<span class="row-label">' + escapeHtml(row.name) + '</span><span class="row-pct">' + row.percent + '%</span></div>' +
+    barHtml(row.percent, factionColorHex(row.faction), 14) +
+    '<div class="ap-meta"><span>' + escapeHtml(diversText) + '</span><span>' + escapeHtml(resistanceText) + '</span></div>' +
+    '<div class="ap-status ' + row.trend.cls + '">' + escapeHtml(row.trend.label) + '</div>' +
+    '</div>';
+}
+
+function activePlanetsSectionHtml(rows) {
+  if (!rows || rows.length === 0) {
+    return '<section class="card"><div class="card-label">ALL ACTIVE PLANETS</div><p class="empty">No active fronts right now.</p></section>';
+  }
+  const itemsHtml = rows.map(activePlanetRowHtml).join("\n");
+  return '<section class="card">' +
+    '<div class="card-label">ALL ACTIVE PLANETS (' + rows.length + ')</div>' +
+    '<p class="note">Every planet with an active campaign right now, sorted by current player count. Resistance is the planet\'s own real regen rate (a documented API field). "Enough divers" reflects only what THIS browser tab has personally observed since it was opened (resets on reload) - not the same longer-window trend the Discord bot computes from its own history.</p>' +
+    '<div class="rows ap-rows">' + itemsHtml + '</div>' +
+    '</section>';
+}
+
 function render() {
   const bannerEl = document.getElementById("banner");
   const sectionsEl = document.getElementById("sections");
@@ -638,6 +747,7 @@ function render() {
     sections.push('<section class="card"><div class="card-label">MAJOR ORDER</div><p class="empty">No active Major Order right now.</p></section>');
   }
   sections.push(defendSectionHtml(cache.defendRows));
+  sections.push(activePlanetsSectionHtml(cache.allActivePlanetRows));
   sectionsEl.innerHTML = sections.join("\n");
 
   updatedEl.textContent = "Updated " + cache.generatedAt.toLocaleTimeString() + " - refreshes every 60s";
