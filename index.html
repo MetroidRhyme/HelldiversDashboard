@@ -39,7 +39,12 @@ h1 { font-size:22px; color:#e8b923; margin:4px 0 2px 0; letter-spacing:0.5px; }
 .enemy-portrait img { width:100%; height:100%; object-fit:cover; }
 .raw-row-top { display:flex; align-items:center; gap:10px; }
 .empty { font-size:14px; color:#9a9aa4; margin:4px 0 0 0; }
-.note { font-size:11.5px; color:#787882; margin:2px 0 14px 0; line-height:1.45; overflow-wrap:break-word; }
+.note { font-size:11.5px; color:#787882; margin:2px 0 12px 0; line-height:1.45; overflow-wrap:break-word; }
+.sort-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:14px; }
+.sort-label { font-size:12px; color:#9a9aa4; }
+.sort-btn { background:#252a34; color:#c4c4cc; border:1px solid #363c48; border-radius:14px; padding:4px 12px; font-size:12px; cursor:pointer; }
+.sort-btn:active { background:#2f3542; }
+.sort-btn-active { background:#e8b923; color:#0d0f14; border-color:#e8b923; font-weight:700; }
 .ap-rows { gap:12px; }
 .ap-row { padding-top:2px; width:100%; }
 .ap-meta { display:flex; justify-content:space-between; gap:8px 14px; font-size:12px; color:#9a9aa4; margin-top:4px; flex-wrap:wrap; }
@@ -471,22 +476,49 @@ function getResistanceRatePctPerHr(planet) {
 }
 
 function buildAllActivePlanetRows(campaigns, totalPlayers) {
-  const rows = campaigns.map(c => {
+  // Left in planet-index order here - sorting is applied at render time
+  // (see sortActivePlanetRows/activeSortMode below) so switching the sort
+  // control doesn't need a fresh fetch, just a re-render of the same data.
+  return campaigns.map(c => {
     const planet = c.planet;
     const progress = getPlanetProgress(planet);
     const playerCount = (planet.statistics && planet.statistics.playerCount) ? planet.statistics.playerCount : 0;
     const playerPct = totalPlayers > 0 ? round1(100 * playerCount / totalPlayers) : 0;
     return {
-      name: asciiSafe(planet.name), faction: progress.faction, percent: progress.percent,
+      index: planet.index, name: asciiSafe(planet.name), faction: progress.faction, percent: progress.percent,
       playerCount, playerPct,
       resistanceRate: getResistanceRatePctPerHr(planet),
       trend: getPlanetTrend(planet.index)
     };
   });
-  // Busiest fronts (most divers actually there right now) first - the most
-  // actionable ordering for "where is everyone, and is it working".
-  rows.sort((a, b) => b.playerCount - a.playerCount);
-  return rows;
+}
+
+// --- Sort control for the All Active Planets section (Anthony's request) --
+// Persisted in localStorage purely as a per-browser convenience (which view
+// you last used) - never anything the page depends on to function, and
+// wrapped defensively since localStorage can throw in some contexts
+// (private browsing, blocked site data).
+const ACTIVE_SORT_MODES = {
+  divers:   { label: "Divers",   cmp: (a, b) => b.playerCount - a.playerCount },
+  progress: { label: "Progress", cmp: (a, b) => b.percent - a.percent },
+  number:   { label: "Number",   cmp: (a, b) => a.index - b.index }
+};
+let activeSortMode = "divers";
+try {
+  const saved = localStorage.getItem("hd2dash_activeSortMode");
+  if (saved && ACTIVE_SORT_MODES[saved]) activeSortMode = saved;
+} catch (e) { }
+
+function setActiveSortMode(mode) {
+  if (!ACTIVE_SORT_MODES[mode]) return;
+  activeSortMode = mode;
+  try { localStorage.setItem("hd2dash_activeSortMode", mode); } catch (e) { }
+  render(); // re-render only - the underlying data is already cached, no refetch needed
+}
+
+function sortActivePlanetRows(rows, mode) {
+  const sortDef = ACTIVE_SORT_MODES[mode] || ACTIVE_SORT_MODES.divers;
+  return rows.slice().sort(sortDef.cmp);
 }
 
 // --- Live API fetch, with the same transient-failure retry behavior as ----
@@ -707,14 +739,25 @@ function activePlanetRowHtml(row) {
     '</div>';
 }
 
+function sortControlHtml() {
+  const buttons = Object.keys(ACTIVE_SORT_MODES).map(mode => {
+    const def = ACTIVE_SORT_MODES[mode];
+    const activeClass = (mode === activeSortMode) ? " sort-btn-active" : "";
+    return '<button type="button" class="sort-btn' + activeClass + '" onclick="setActiveSortMode(\'' + mode + '\')">' + escapeHtml(def.label) + '</button>';
+  }).join("");
+  return '<div class="sort-row"><span class="sort-label">Sort by:</span>' + buttons + '</div>';
+}
+
 function activePlanetsSectionHtml(rows) {
   if (!rows || rows.length === 0) {
     return '<section class="card"><div class="card-label">ALL ACTIVE PLANETS</div><p class="empty">No active fronts right now.</p></section>';
   }
-  const itemsHtml = rows.map(activePlanetRowHtml).join("\n");
+  const sortedRows = sortActivePlanetRows(rows, activeSortMode);
+  const itemsHtml = sortedRows.map(activePlanetRowHtml).join("\n");
   return '<section class="card">' +
     '<div class="card-label">ALL ACTIVE PLANETS (' + rows.length + ')</div>' +
-    '<p class="note">Every planet with an active campaign right now, sorted by current player count. Resistance is the planet\'s own real regen rate (a documented API field). "Enough divers" reflects only what THIS browser tab has personally observed since it was opened (resets on reload) - not the same longer-window trend the Discord bot computes from its own history.</p>' +
+    '<p class="note">Every planet with an active campaign right now. Resistance is the planet\'s own real regen rate (a documented API field). "Enough divers" reflects only what THIS browser tab has personally observed since it was opened (resets on reload) - not the same longer-window trend the Discord bot computes from its own history.</p>' +
+    sortControlHtml() +
     '<div class="rows ap-rows">' + itemsHtml + '</div>' +
     '</section>';
 }
