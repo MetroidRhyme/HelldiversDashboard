@@ -33,6 +33,7 @@ h1 { font-size:22px; color:#e8b923; margin:4px 0 2px 0; letter-spacing:0.5px; }
 .bar-caption { font-size:10.5px; font-weight:700; letter-spacing:0.5px; color:#6c6c76; margin:6px 0 3px 0; }
 .bar-caption:first-of-type { margin-top:2px; }
 .bar { background:#252a34; border-radius:6px; overflow:hidden; width:100%; }
+.elapsed-bar { margin-top:3px; opacity:0.85; }
 .bar-fill { height:100%; border-radius:6px; max-width:100%; }
 .caption { font-size:12.5px; color:#c4c4cc; margin-top:4px; overflow-wrap:break-word; }
 .caption-blocked { color:#d7a05a; font-weight:600; }
@@ -646,10 +647,11 @@ async function updateCache(force) {
 
 // --- Rendering ---------------------------------------------------------------
 
-function barHtml(percent, colorHex, heightPx) {
+function barHtml(percent, colorHex, heightPx, extraClass) {
   const pct = clampPct(percent);
   const h = heightPx || 22;
-  return '<div class="bar" style="height:' + h + 'px;"><div class="bar-fill" style="width:' + pct + '%;background:' + colorHex + ';"></div></div>';
+  const cls = "bar" + (extraClass ? " " + extraClass : "");
+  return '<div class="' + cls + '" style="height:' + h + 'px;"><div class="bar-fill" style="width:' + pct + '%;background:' + colorHex + ';"></div></div>';
 }
 
 function badgeHtml(faction, imageDataUri) {
@@ -740,8 +742,7 @@ function defendSectionHtml(defendRows) {
       '<div class="row-top">' + badgeHtml(row.faction, factionIcon) + '<span class="row-label">' + escapeHtml(row.name) + '</span><span class="row-pct">' + row.percent + '%</span></div>' +
       '<div class="bar-caption">DEFENSE PROGRESS</div>' +
       barHtml(row.percent, factionColorHex(row.faction)) +
-      '<div class="bar-caption">TIME ELAPSED</div>' +
-      barHtml(row.elapsedPercent, "#5a6070") +
+      barHtml(row.elapsedPercent, "#5a6070", 6, "elapsed-bar") +
       '<div class="ap-status ' + row.paceCls + '">' + escapeHtml(row.paceStatus) + '</div>' +
       '<div class="caption">' + escapeHtml(row.timeLeftText) + ' - ' + row.elapsedPercent + '% of window elapsed</div>' +
       '<div class="conditions">' + escapeHtml(row.conditionsText) + '</div>' +
