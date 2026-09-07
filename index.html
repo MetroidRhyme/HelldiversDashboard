@@ -501,8 +501,7 @@ function buildAllActivePlanetRows(campaigns, totalPlayers) {
 // (private browsing, blocked site data).
 const ACTIVE_SORT_MODES = {
   divers:   { label: "Divers",   cmp: (a, b) => b.playerCount - a.playerCount },
-  progress: { label: "Progress", cmp: (a, b) => b.percent - a.percent },
-  number:   { label: "Number",   cmp: (a, b) => a.index - b.index }
+  progress: { label: "Progress", cmp: (a, b) => b.percent - a.percent }
 };
 let activeSortMode = "divers";
 try {
