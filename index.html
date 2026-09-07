@@ -58,6 +58,13 @@ h1 { font-size:22px; color:#e8b923; margin:4px 0 2px 0; letter-spacing:0.5px; }
 .trend-flat { color:#d7a05a; }
 .mod-row { display:flex; flex-wrap:wrap; gap:4px; margin:2px 0 6px 0; }
 .mod-badge { font-size:10.5px; font-weight:700; letter-spacing:0.3px; color:#ffb3b3; background:#3a1f24; border:1px solid #5a2a2a; border-radius:10px; padding:2px 8px; white-space:nowrap; }
+.region-list { display:flex; flex-direction:column; gap:3px; margin:2px 0 8px 0; }
+.region-row { display:flex; justify-content:space-between; gap:8px 12px; font-size:12px; flex-wrap:wrap; }
+.region-name { font-weight:600; color:#c4c4cc; }
+.region-meta { color:#9a9aa4; }
+.dss-action { margin-bottom:14px; }
+.dss-action:last-child { margin-bottom:0; }
+.dss-action-name { font-size:14px; font-weight:700; color:#e8b923; margin-bottom:3px; letter-spacing:0.3px; }
 .footer { font-size:11.5px; color:#666670; text-align:center; margin-top:6px; line-height:1.5; overflow-wrap:break-word; }
 .footer a { color:#787882; }
 </style>
@@ -73,7 +80,8 @@ h1 { font-size:22px; color:#e8b923; margin:4px 0 2px 0; letter-spacing:0.5px; }
 <div class="footer">
   Data: api.helldivers2.dev (community, unofficial), fetched live by your browser - nothing runs on a server for this page.<br>
   Task-to-planet mapping and blocked/prereq detection are best-effort heuristics, not documented API fields.<br>
-  No trend/history here (this page has no server-side history to draw on) - see the Discord channel for trend/prognosis and the activity log.
+  No trend/history here (this page has no server-side history to draw on) - see the Discord channel for trend/prognosis and the activity log.<br>
+  Democracy Space Station funding/status fields and multi-front convergence counts are real, live API fields, best-effort interpreted the same as the above.
 </div>
 
 <script>
@@ -222,6 +230,14 @@ function asciiSafe(text) {
 function fmtNum(n) {
   if (n === null || n === undefined || isNaN(n)) return "?";
   return Math.round(n).toLocaleString("en-US");
+}
+
+// Democracy Space Station tactical-action text (strategicDescription, etc.)
+// comes back with simple inline markup (<span data-ah="1">...</span>) - this
+// page has no use for that styling, just the plain words.
+function stripTags(text) {
+  if (!text) return "";
+  return String(text).replace(/<[^>]*>/g, "");
 }
 
 // Compact "1d 4h left" / "6h left" / "12m left" countdown.
@@ -592,7 +608,30 @@ function getResistanceRatePctPerHr(planet) {
   return round1(100 * regen * 3600 / planet.maxHealth);
 }
 
-function buildAllActivePlanetRows(campaigns, totalPlayers, nowUtc, planetModifiers) {
+// --- Multi-front pressure (Anthony's request - "where are converging pushes
+// happening") --------------------------------------------------------------
+// planet.attacking (already present on every plain /api/v1/planets entry,
+// just never read before) lists the OTHER planet indices this planet is
+// currently attacking toward. Inverting that into "who is attacking ME"
+// surfaces real convergence: a target fed from 2+ directions at once is
+// either close to flipping (if we're the ones converging on an enemy world)
+// or facing an escalating multi-pronged invasion (if enemy-owned planets are
+// converging on one of ours) - either way, more actionable than a single
+// isolated front. Distinct from planet.waypoints (mere adjacency/potential,
+// used elsewhere for blocked-planet detection) - this is active pressure.
+function buildAttackPressureMap(planets) {
+  const inbound = new Map(); // target planet index -> [{index, name, sector, owner}]
+  planets.forEach(p => {
+    (p.attacking || []).forEach(targetIdx => {
+      let arr = inbound.get(targetIdx);
+      if (!arr) { arr = []; inbound.set(targetIdx, arr); }
+      arr.push({ index: p.index, name: asciiSafe(p.name), sector: asciiSafe(p.sector), owner: p.currentOwner });
+    });
+  });
+  return inbound;
+}
+
+function buildAllActivePlanetRows(campaigns, totalPlayers, nowUtc, planetModifiers, attackPressureMap) {
   // Left in planet-index order here - sorting is applied at render time
   // (see sortActivePlanetRows/activeSortMode below) so switching the sort
   // control doesn't need a fresh fetch, just a re-render of the same data.
@@ -607,13 +646,20 @@ function buildAllActivePlanetRows(campaigns, totalPlayers, nowUtc, planetModifie
     const resistanceRate = getResistanceRatePctPerHr(planet);
     const modifierSet = planetModifiers ? planetModifiers.get(planet.index) : null;
     const modifiers = modifierSet ? Array.from(modifierSet).sort() : [];
+    // Region (town/city) breakdown - also already present on the plain
+    // planets payload, just never read before. Most planets have 0 or 1
+    // regions (nothing to add over the planet-level percent already
+    // shown); only worth surfacing when there's a real breakdown to show.
+    const regions = (planet.regions && planet.regions.length > 1) ? planet.regions : [];
+    const pressureFronts = attackPressureMap ? (attackPressureMap.get(planet.index) || []) : [];
     return {
       index: planet.index, name: asciiSafe(planet.name), sector: asciiSafe(planet.sector), faction: progress.faction, percent: progress.percent,
+      mode: progress.mode,
       playerCount, playerPct,
       resistanceRate,
       trend: getPlanetTrend(planet.index, resistanceRate),
       conditionsText: asciiSafe(getPlanetConditionsText(planet)),
-      pace, modifiers
+      pace, modifiers, regions, pressureFronts
     };
   });
 }
@@ -717,6 +763,70 @@ async function fetchPlanetModifiers() {
   return modifiersByIndex;
 }
 
+// --- Democracy Space Station (Anthony's request - "where should I deploy --
+// for maximum effect", 2026-09-07) -------------------------------------------
+// The DSS orbits exactly one planet at a time and grants that planet real
+// gameplay bonuses (its tacticalActions) - direct "deploy here for a
+// multiplier" signal this page had never surfaced before. Found via
+// /api/v2/space-stations (confirmed live and CORS-enabled the same way as
+// the other endpoints); the v1 station endpoint exists too but omits
+// tacticalActions, so v2 is used here.
+// NOTE ON tacticalActions[].status: this numeric field is NOT in any public
+// schema doc - values 1 and 3 have both been observed live, but their exact
+// meaning wasn't confirmed against source, so this page does not assert a
+// meaning for it. What IS shown (funding-meter fraction from costs[0], and
+// the plain-language effect text the game itself provides) is real data,
+// not a guess.
+// Same optional-enhancement pattern as fetchPlanetModifiers above - its own
+// try/catch, degrades to "no DSS section shown" on any failure rather than
+// risking the rest of a working page.
+async function fetchDemocracySpaceStation() {
+  try {
+    const stations = await hd2Fetch("/api/v2/space-stations");
+    if (!stations || stations.length === 0) return null;
+    return stations[0]; // only one DSS has existed at a time as of this writing
+  } catch (e) {
+    console.warn("HD2 dashboard: could not fetch Democracy Space Station info (non-fatal, section just won't show)", e);
+    return null;
+  }
+}
+
+function buildTacticalActionInfo(action, nowUtc) {
+  const cost = (action.costs && action.costs[0]) ? action.costs[0] : null;
+  let fundedPct = null;
+  if (cost && cost.targetValue > 0) fundedPct = clampPct(round1(100 * cost.currentValue / cost.targetValue));
+  let statusExpireText = null;
+  if (action.statusExpire) {
+    try {
+      const hoursLeft = (new Date(action.statusExpire) - nowUtc) / 3600000;
+      statusExpireText = formatTimeLeft(hoursLeft);
+    } catch (e) { }
+  }
+  return {
+    name: asciiSafe(action.name),
+    effectText: asciiSafe(stripTags(action.strategicDescription || action.description || "")),
+    fundedPct, statusExpireText
+  };
+}
+
+function buildDssInfo(station, nowUtc) {
+  if (!station || !station.planet) return null;
+  const planet = station.planet;
+  let electionText = null;
+  if (station.electionEnd) {
+    try {
+      const hoursLeft = (new Date(station.electionEnd) - nowUtc) / 3600000;
+      electionText = formatTimeLeft(hoursLeft);
+    } catch (e) { }
+  }
+  const actions = (station.tacticalActions || []).map(a => buildTacticalActionInfo(a, nowUtc));
+  return {
+    planetIndex: planet.index, planetName: asciiSafe(planet.name), sector: asciiSafe(planet.sector),
+    conditionsText: asciiSafe(getPlanetConditionsText(planet)),
+    electionText, actions
+  };
+}
+
 // --- Cache: don't refetch more often than CONFIG.cacheSeconds regardless --
 // --- of how often the refresh loop/button asks - a courtesy to the shared -
 // --- community API's rate limit, same idea as the old server-side page's --
@@ -732,11 +842,12 @@ async function updateCache(force) {
   if (refreshing) return;
   refreshing = true;
   try {
-    const [assignments, planets, campaigns, planetModifiers] = await Promise.all([
+    const [assignments, planets, campaigns, planetModifiers, dssStation] = await Promise.all([
       hd2Fetch("/api/v1/assignments"),
       hd2Fetch("/api/v1/planets"),
       hd2Fetch("/api/v1/campaigns"),
-      fetchPlanetModifiers()
+      fetchPlanetModifiers(),
+      fetchDemocracySpaceStation()
     ]);
     cacheError = null;
 
@@ -766,9 +877,11 @@ async function updateCache(force) {
     const nowMs = Date.now();
     campaigns.forEach(c => recordPlanetHistory(c.planet.index, getPlanetProgress(c.planet).percent, nowMs));
     savePlanetHistory();
-    const allActivePlanetRows = buildAllActivePlanetRows(campaigns, totalPlayers, nowUtc, planetModifiers);
+    const attackPressureMap = buildAttackPressureMap(planets);
+    const allActivePlanetRows = buildAllActivePlanetRows(campaigns, totalPlayers, nowUtc, planetModifiers, attackPressureMap);
+    const dssInfo = buildDssInfo(dssStation, nowUtc);
 
-    cache = { generatedAt: nowUtc, hasMajorOrder, majorOrder, strategicOpportunities, defendRows, allActivePlanetRows, totalPlayers };
+    cache = { generatedAt: nowUtc, hasMajorOrder, majorOrder, strategicOpportunities, defendRows, allActivePlanetRows, totalPlayers, dssInfo };
     cacheAtMs = Date.now();
   } catch (e) {
     cacheError = (e && e.message) ? e.message : String(e);
@@ -884,6 +997,66 @@ function defendSectionHtml(defendRows) {
   return '<section class="card"><div class="card-label">PLANETS UNDER ATTACK</div><div class="rows">' + itemsHtml + '</div></section>';
 }
 
+function dssSectionHtml(dssInfo) {
+  // Optional enhancement - if the fetch failed or no station data came
+  // back, just omit the section entirely rather than show an empty/error
+  // card (same "degrade quietly" pattern as planet-modifier badges).
+  if (!dssInfo) return "";
+
+  const actionsHtml = dssInfo.actions.map(a => {
+    const fundedText = (a.fundedPct !== null) ? a.fundedPct + '%' : 'n/a';
+    const fundedBar = (a.fundedPct !== null) ? barHtml(a.fundedPct, "#e8b923", 6) : "";
+    const expireLine = a.statusExpireText ? '<div class="conditions">Next status change: ' + escapeHtml(a.statusExpireText) + '</div>' : "";
+    return '<div class="dss-action">' +
+      '<div class="dss-action-name">' + escapeHtml(a.name) + '</div>' +
+      '<div class="caption">' + escapeHtml(a.effectText) + '</div>' +
+      '<div class="bar-caption">STATION FUNDING - ' + fundedText + '</div>' +
+      fundedBar + expireLine +
+      '</div>';
+  }).join("");
+
+  const electionLine = dssInfo.electionText
+    ? '<div class="ap-meta"><span>Next election: ' + escapeHtml(dssInfo.electionText) + ' (station may relocate)</span></div>'
+    : "";
+
+  return '<section class="card">' +
+    '<div class="card-label">DEMOCRACY SPACE STATION</div>' +
+    '<h2 class="card-title">Orbiting ' + escapeHtml(dssInfo.planetName) + '</h2>' +
+    '<div class="conditions">' + escapeHtml(dssInfo.sector) + ' sector - ' + escapeHtml(dssInfo.conditionsText) + '</div>' +
+    electionLine +
+    '<p class="note">Every tactical action below currently boosts whichever planet is named above - that can change after an election. "Station funding" and status-change countdowns are the real underlying meter/timer fields; the game does not publicly document exactly what triggers each transition, so treat these as directional, not exact.</p>' +
+    (actionsHtml || '<p class="empty">No tactical actions reported.</p>') +
+    '</section>';
+}
+
+// Region (town/city) breakdown for a planet with more than one named
+// region - see buildAllActivePlanetRows. Skipped entirely for the ~70% of
+// planets that only have 0-1 regions (nothing to add there).
+function regionsHtml(regions) {
+  if (!regions || regions.length < 2) return "";
+  const items = regions.map(r => {
+    const pct = (r.maxHealth > 0) ? round1(100 * (r.maxHealth - r.health) / r.maxHealth) : 0;
+    const availText = r.isAvailable ? "" : " - not yet open for missions";
+    return '<div class="region-row"><span class="region-name">' + escapeHtml(r.name) + ' (' + escapeHtml(r.size) + ')</span>' +
+      '<span class="region-meta">' + fmtNum(r.players) + ' divers - ' + pct + '% cleared' + escapeHtml(availText) + '</span></div>';
+  }).join("");
+  return '<div class="bar-caption">REGIONS</div><div class="region-list">' + items + '</div>';
+}
+
+// Multi-front pressure line - see buildAttackPressureMap. Only worth a line
+// when 2+ fronts converge on the same target; a single front is just the
+// one campaign already shown by the row itself.
+function pressureHtml(row) {
+  if (!row.pressureFronts || row.pressureFronts.length < 2) return "";
+  const names = row.pressureFronts.map(f => f.sector).filter((s, i, a) => a.indexOf(s) === i);
+  const shown = names.slice(0, 3).join(", ") + (names.length > 3 ? " +" + (names.length - 3) + " more" : "");
+  const count = row.pressureFronts.length;
+  if (row.mode === "Defend") {
+    return '<div class="ap-status trend-down">Under pressure from ' + count + ' fronts (' + escapeHtml(shown) + ') - reinforcements needed</div>';
+  }
+  return '<div class="ap-status trend-up">Converging assault from ' + count + ' fronts (' + escapeHtml(shown) + ') - high priority, may fall soon</div>';
+}
+
 function activePlanetRowHtml(row) {
   const factionIcon = iconDataUri(FACTION_ICON_B64[row.faction]);
   const resistanceText = (row.resistanceRate !== null) ? row.resistanceRate + "%/hr resistance" : "resistance unknown";
@@ -913,8 +1086,10 @@ function activePlanetRowHtml(row) {
     modifiersHtml +
     barHtml(row.percent, factionColorHex(row.faction), 14) +
     defenseHtml +
+    regionsHtml(row.regions) +
     '<div class="ap-meta"><span>' + escapeHtml(diversText) + '</span><span>' + escapeHtml(resistanceText) + '</span></div>' +
     '<div class="ap-status ' + row.trend.cls + '">' + escapeHtml(row.trend.label) + '</div>' +
+    pressureHtml(row) +
     detailsHtml +
     '</div>';
 }
@@ -969,6 +1144,8 @@ function render() {
   } else {
     sections.push('<section class="card"><div class="card-label">MAJOR ORDER</div><p class="empty">No active Major Order right now.</p></section>');
   }
+  const dssHtml = dssSectionHtml(cache.dssInfo);
+  if (dssHtml) sections.push(dssHtml);
   sections.push(defendSectionHtml(cache.defendRows));
   sections.push(activePlanetsSectionHtml(cache.allActivePlanetRows));
   sectionsEl.innerHTML = sections.join("\n");
