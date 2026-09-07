@@ -400,6 +400,38 @@ function buildAssignmentRows(assignment, planetsByIndex, campaigns) {
   };
 }
 
+// "Are we winning?" for a defense event - the API gives no separate enemy-
+// progress field (checked the live event object directly: id, eventType,
+// faction, health, maxHealth, startTime, endTime, campaignId,
+// jointOperationIds - nothing else), so this compares the two real
+// quantities the API DOES give: how much of the defense is actually
+// repelled (progress.percent) vs. how much of the event's own time window
+// has already run out (elapsedPercent). Ahead of that pace means the repel
+// is on track to finish before the clock does; behind it means the
+// opposite - the closest honest answer to "enemy progress" without
+// inventing a number the API doesn't provide. Returns null for a planet
+// with no active event (nothing to compare).
+function getDefensePaceInfo(planet, progress, nowUtc) {
+  if (!planet.event) return null;
+  let timeLeftText = "unknown", elapsedPercent = 0;
+  if (planet.event.startTime && planet.event.endTime) {
+    try {
+      const evtStart = new Date(planet.event.startTime);
+      const evtEnd = new Date(planet.event.endTime);
+      const totalHours = (evtEnd - evtStart) / 3600000;
+      const remainingHours = (evtEnd - nowUtc) / 3600000;
+      if (totalHours > 0) elapsedPercent = clampPct(100 * ((nowUtc - evtStart) / 3600000) / totalHours);
+      timeLeftText = formatTimeLeft(remainingHours);
+    } catch (e) { }
+  }
+  const paceDelta = round1(progress.percent - elapsedPercent);
+  let paceStatus, paceCls;
+  if (paceDelta > 5) { paceStatus = "Ahead of pace - likely to hold"; paceCls = "trend-up"; }
+  else if (paceDelta < -5) { paceStatus = "Behind pace - at risk"; paceCls = "trend-down"; }
+  else { paceStatus = "On pace - too close to call"; paceCls = "trend-flat"; }
+  return { timeLeftText, elapsedPercent: round1(elapsedPercent), paceStatus, paceCls };
+}
+
 // --- Defend fronts: planets with an active event, excluding this order's --
 // --- own target planets (same filter as the Discord card - see the skill --
 // --- doc's ""Defend fronts" / "Planets Under Attack"" architecture note). -
@@ -409,37 +441,12 @@ function buildDefendRows(campaigns, excludeIndices, nowUtc) {
   const rows = candidates.map(c => {
     const planet = c.planet;
     const progress = getPlanetProgress(planet);
-    let timeLeftText = "unknown", elapsedPercent = 0;
-    if (planet.event.startTime && planet.event.endTime) {
-      try {
-        const evtStart = new Date(planet.event.startTime);
-        const evtEnd = new Date(planet.event.endTime);
-        const totalHours = (evtEnd - evtStart) / 3600000;
-        const remainingHours = (evtEnd - nowUtc) / 3600000;
-        if (totalHours > 0) elapsedPercent = clampPct(100 * ((nowUtc - evtStart) / 3600000) / totalHours);
-        timeLeftText = formatTimeLeft(remainingHours);
-      } catch (e) { }
-    }
-    // "Are we winning?" - the API gives no separate enemy-progress field for
-    // a defense event (checked the live event object directly: id,
-    // eventType, faction, health, maxHealth, startTime, endTime,
-    // campaignId, jointOperationIds - nothing else), so this compares the
-    // two real quantities the API DOES give: how much of the defense is
-    // actually repelled (percent) vs. how much of the event's own time
-    // window has already run out (elapsedPercent). Ahead of that pace means
-    // the repel is on track to finish before the clock does; behind it
-    // means the opposite - the closest honest answer to "enemy progress"
-    // without inventing a number the API doesn't provide.
-    const paceDelta = round1(progress.percent - elapsedPercent);
-    let paceStatus, paceCls;
-    if (paceDelta > 5) { paceStatus = "Ahead of pace - likely to hold"; paceCls = "trend-up"; }
-    else if (paceDelta < -5) { paceStatus = "Behind pace - at risk"; paceCls = "trend-down"; }
-    else { paceStatus = "On pace - too close to call"; paceCls = "trend-flat"; }
-
+    const pace = getDefensePaceInfo(planet, progress, nowUtc);
     return {
       name: asciiSafe(planet.name), percent: progress.percent, faction: progress.faction,
-      conditionsText: asciiSafe(getPlanetConditionsText(planet)), timeLeftText, elapsedPercent: round1(elapsedPercent),
-      paceStatus, paceCls
+      conditionsText: asciiSafe(getPlanetConditionsText(planet)),
+      timeLeftText: pace.timeLeftText, elapsedPercent: pace.elapsedPercent,
+      paceStatus: pace.paceStatus, paceCls: pace.paceCls
     };
   });
   rows.sort((a, b) => b.percent - a.percent);
@@ -495,7 +502,7 @@ function getResistanceRatePctPerHr(planet) {
   return round1(100 * regen * 3600 / planet.maxHealth);
 }
 
-function buildAllActivePlanetRows(campaigns, totalPlayers) {
+function buildAllActivePlanetRows(campaigns, totalPlayers, nowUtc) {
   // Left in planet-index order here - sorting is applied at render time
   // (see sortActivePlanetRows/activeSortMode below) so switching the sort
   // control doesn't need a fresh fetch, just a re-render of the same data.
@@ -504,12 +511,16 @@ function buildAllActivePlanetRows(campaigns, totalPlayers) {
     const progress = getPlanetProgress(planet);
     const playerCount = (planet.statistics && planet.statistics.playerCount) ? planet.statistics.playerCount : 0;
     const playerPct = totalPlayers > 0 ? round1(100 * playerCount / totalPlayers) : 0;
+    // Same defense-vs-clock pace info Planets Under Attack shows - null for
+    // any planet not currently under an active event (most of them).
+    const pace = getDefensePaceInfo(planet, progress, nowUtc);
     return {
       index: planet.index, name: asciiSafe(planet.name), sector: asciiSafe(planet.sector), faction: progress.faction, percent: progress.percent,
       playerCount, playerPct,
       resistanceRate: getResistanceRatePctPerHr(planet),
       trend: getPlanetTrend(planet.index),
-      conditionsText: asciiSafe(getPlanetConditionsText(planet))
+      conditionsText: asciiSafe(getPlanetConditionsText(planet)),
+      pace
     };
   });
 }
@@ -633,7 +644,7 @@ async function updateCache(force) {
     // shows up in the same render that crossed the threshold.
     const nowMs = Date.now();
     campaigns.forEach(c => recordPlanetHistory(c.planet.index, getPlanetProgress(c.planet).percent, nowMs));
-    const allActivePlanetRows = buildAllActivePlanetRows(campaigns, totalPlayers);
+    const allActivePlanetRows = buildAllActivePlanetRows(campaigns, totalPlayers, nowUtc);
 
     cache = { generatedAt: nowUtc, hasMajorOrder, majorOrder, strategicOpportunities, defendRows, allActivePlanetRows, totalPlayers };
     cacheAtMs = Date.now();
@@ -758,9 +769,20 @@ function activePlanetRowHtml(row) {
   let detailsText = row.conditionsText || "";
   if (row.sector) detailsText = row.sector + " sector - " + detailsText;
   const detailsHtml = detailsText ? '<div class="conditions">' + escapeHtml(detailsText) + '</div>' : "";
+
+  // Same defense-vs-clock pace info as Planets Under Attack, for a planet
+  // that's currently under an active event (most active planets are plain
+  // Liberate campaigns and won't have this - row.pace is null for those).
+  let defenseHtml = "";
+  if (row.pace) {
+    defenseHtml = barHtml(row.pace.elapsedPercent, "#5a6070", 6, "elapsed-bar") +
+      '<div class="ap-status ' + row.pace.paceCls + '">' + escapeHtml(row.pace.paceStatus) + ' - ' + escapeHtml(row.pace.timeLeftText) + '</div>';
+  }
+
   return '<div class="ap-row">' +
     '<div class="row-top">' + badgeHtml(row.faction, factionIcon) + '<span class="row-label">' + escapeHtml(row.name) + '</span><span class="row-pct">' + row.percent + '%</span></div>' +
     barHtml(row.percent, factionColorHex(row.faction), 14) +
+    defenseHtml +
     '<div class="ap-meta"><span>' + escapeHtml(diversText) + '</span><span>' + escapeHtml(resistanceText) + '</span></div>' +
     '<div class="ap-status ' + row.trend.cls + '">' + escapeHtml(row.trend.label) + '</div>' +
     detailsHtml +
