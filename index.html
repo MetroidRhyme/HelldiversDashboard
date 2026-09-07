@@ -515,7 +515,16 @@ loadPlanetHistory();
 // currently doing. Both readings use the SAME percent this page already
 // shows (liberate % or defend %, ownership-aware via getPlanetProgress), so
 // "up" always means "the good direction" regardless of mode.
-function getPlanetTrend(index) {
+// resistanceRate (this planet's real regenPerSecond, as %/hr - see
+// getResistanceRatePctPerHr) is only used to pick accurate wording for the
+// FLAT case. Anthony reported seeing "not enough divers to outpace
+// resistance" on planets that were also showing 0%/hr resistance - true,
+// but misleading: with nothing decaying the planet, "outpacing resistance"
+// isn't the actual problem, there's simply no real activity moving the
+// needle (usually near-zero player count). The up/down cases don't need
+// this - a real observed rate is a real observed rate regardless of what's
+// causing it.
+function getPlanetTrend(index, resistanceRate) {
   const hist = planetHistory.get(index);
   if (!hist || hist.length < 2) return { label: "gathering data...", cls: "trend-unknown" };
   const newest = hist[hist.length - 1];
@@ -526,7 +535,9 @@ function getPlanetTrend(index) {
   const rate = (newest.percent - oldest.percent) / hours;
   if (rate > PLANET_TREND_EPS_PCT_PER_HR) return { label: "+" + round1(rate) + "%/hr - enough divers", cls: "trend-up" };
   if (rate < -PLANET_TREND_EPS_PCT_PER_HR) return { label: round1(rate) + "%/hr - losing ground", cls: "trend-down" };
-  return { label: "~flat - not enough divers to outpace resistance", cls: "trend-flat" };
+  const hasRealResistance = resistanceRate !== null && resistanceRate > 0.05;
+  if (hasRealResistance) return { label: "~flat - not enough divers to outpace resistance", cls: "trend-flat" };
+  return { label: "~flat - too few active divers to move the needle", cls: "trend-flat" };
 }
 
 // planet.regenPerSecond is a real, documented API field (health units/sec
@@ -551,11 +562,12 @@ function buildAllActivePlanetRows(campaigns, totalPlayers, nowUtc) {
     // Same defense-vs-clock pace info Planets Under Attack shows - null for
     // any planet not currently under an active event (most of them).
     const pace = getDefensePaceInfo(planet, progress, nowUtc);
+    const resistanceRate = getResistanceRatePctPerHr(planet);
     return {
       index: planet.index, name: asciiSafe(planet.name), sector: asciiSafe(planet.sector), faction: progress.faction, percent: progress.percent,
       playerCount, playerPct,
-      resistanceRate: getResistanceRatePctPerHr(planet),
-      trend: getPlanetTrend(planet.index),
+      resistanceRate,
+      trend: getPlanetTrend(planet.index, resistanceRate),
       conditionsText: asciiSafe(getPlanetConditionsText(planet)),
       pace
     };
