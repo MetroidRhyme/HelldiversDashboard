@@ -472,6 +472,43 @@ function recordPlanetHistory(index, percent, nowMs) {
   while (hist.length > 0 && nowMs - hist[0].t > PLANET_TREND_WINDOW_MS) hist.shift();
 }
 
+// --- Persist planetHistory across reloads (Anthony's request - the 4-min --
+// --- "gathering data..." warm-up otherwise restarts every time the tab is -
+// --- reloaded). localStorage, not an actual cookie - a cookie would get
+// --- sent to a server on every request (this page has none to read it),
+// --- has a much smaller size cap, and localStorage is already the same
+// --- mechanism the sort-mode preference uses. Never load-bearing: every
+// --- read/write is wrapped defensively, and a totally empty/corrupt/
+// --- missing value just means an empty starting history, same as a first
+// --- visit ever had.
+const PLANET_HISTORY_STORAGE_KEY = "hd2dash_planetHistory_v1";
+
+function loadPlanetHistory() {
+  try {
+    const raw = localStorage.getItem(PLANET_HISTORY_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    const nowMs = Date.now();
+    for (const key in parsed) {
+      // Re-prune against the CURRENT time on load, not just trusting
+      // whatever was saved - a tab reopened hours later should fall back
+      // to "gathering data..." like normal, not show an hours-stale rate.
+      const hist = (parsed[key] || []).filter(pt => nowMs - pt.t <= PLANET_TREND_WINDOW_MS);
+      if (hist.length > 0) planetHistory.set(Number(key), hist);
+    }
+  } catch (e) { }
+}
+
+function savePlanetHistory() {
+  try {
+    const obj = {};
+    planetHistory.forEach((hist, index) => { obj[index] = hist; });
+    localStorage.setItem(PLANET_HISTORY_STORAGE_KEY, JSON.stringify(obj));
+  } catch (e) { }
+}
+
+loadPlanetHistory();
+
 // Real progress ("+X%/hr") means the current player count is outpacing the
 // planet's own regenPerSecond decay; "~flat" means it roughly isn't - the
 // planet's own resistance is basically absorbing whatever damage divers are
@@ -644,6 +681,7 @@ async function updateCache(force) {
     // shows up in the same render that crossed the threshold.
     const nowMs = Date.now();
     campaigns.forEach(c => recordPlanetHistory(c.planet.index, getPlanetProgress(c.planet).percent, nowMs));
+    savePlanetHistory();
     const allActivePlanetRows = buildAllActivePlanetRows(campaigns, totalPlayers, nowUtc);
 
     cache = { generatedAt: nowUtc, hasMajorOrder, majorOrder, strategicOpportunities, defendRows, allActivePlanetRows, totalPlayers };
