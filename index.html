@@ -56,6 +56,8 @@ h1 { font-size:22px; color:#e8b923; margin:4px 0 2px 0; letter-spacing:0.5px; }
 .trend-up { color:#8cc850; }
 .trend-down { color:#d75a5a; }
 .trend-flat { color:#d7a05a; }
+.mod-row { display:flex; flex-wrap:wrap; gap:4px; margin:2px 0 6px 0; }
+.mod-badge { font-size:10.5px; font-weight:700; letter-spacing:0.3px; color:#ffb3b3; background:#3a1f24; border:1px solid #5a2a2a; border-radius:10px; padding:2px 8px; white-space:nowrap; }
 .footer { font-size:11.5px; color:#666670; text-align:center; margin-top:6px; line-height:1.5; overflow-wrap:break-word; }
 .footer a { color:#787882; }
 </style>
@@ -150,6 +152,46 @@ const KNOWN_UNIT_IMAGE_KEYS = {
   "4066406510": "vox_engine",
   "3621116014": "obtruder",
   "1870840792": "gatekeeper"
+};
+
+// --- Planet modifiers (Jet Brigade, Hive World, etc. - Anthony's request) --
+// NOT available on the clean /api/v1/planets endpoint at all (its schema has
+// no effects/modifiers field - checked directly against the OpenAPI spec).
+// The only place this data exists is the RAW passthrough of Arrowhead's own
+// backend (/raw/api/WarSeason/{warId}/Status), which carries a
+// planetActiveEffects array of {index, galacticEffectId} pairs - confirmed
+// live and CORS-enabled the same way the /api/v1/* endpoints are.
+// galacticEffectId only turns into a real name via a separate static table
+// from the API authors' own reference-data repo (github.com/helldivers-2/
+// json, effects/planetEffects.json - ~34KB, 156 entries as of 2026-09-07,
+// covering everything from real enemy special forces down to flavor-only
+// infrastructure like "CENTER OF SCIENCE" and one-off stratagem unlocks).
+// Rather than embed all 156 (mostly noise for this purpose) or fetch that
+// file live from a third party at runtime (one more thing that can fail,
+// for data that barely changes), this is a hand-curated subset - the same
+// "empirically extended by hand" pattern this project already uses for
+// enemy unit names/portraits. Each entry here is a canonical display name;
+// most modifiers appear as TWO ids in the live data (a plain id and an
+// "(Enemies)"-suffixed one, e.g. 1202+1203 for Jet Brigade) both meaning the
+// same thing, so both map to one shared name and a planet with both only
+// shows one badge. Extend this the same way if a new one shows up
+// unrecognized (cross-reference its galacticEffectId against a fresh pull
+// of planetEffects.json).
+const PLANET_MODIFIER_NAMES = {
+  "1202": "Jet Brigade",        "1203": "Jet Brigade",
+  "1243": "Predator Strain",    "1245": "Predator Strain",
+  "1244": "Spore Burst Strain", "1386": "Spore Burst Strain",
+  "1248": "Incineration Corps", "1249": "Incineration Corps",
+  "1303": "Rupture Strain",     "1310": "Rupture Strain",
+  "1306": "Dragonroaches",      "1309": "Dragonroaches",
+  "1307": "Hive Lords",         "1308": "Hive Lords",
+  "1360": "Cyborgs",            "1361": "Cyborgs",
+  "1377": "Mindless Masses",    "1378": "Mindless Masses",
+  "1379": "Appropriators",      "1380": "Appropriators",
+  "1400": "Heavy SEAF Presence", "1401": "Heavy SEAF Presence",
+  "1402": "Vote Snatchers",     "1403": "Vote Snatchers",
+  "1413": "Invasion Fleet",     "1414": "Invasion Fleet",
+  "1311": "Hive World"
 };
 
 function round1(n) { return Math.round(n * 10) / 10; }
@@ -550,7 +592,7 @@ function getResistanceRatePctPerHr(planet) {
   return round1(100 * regen * 3600 / planet.maxHealth);
 }
 
-function buildAllActivePlanetRows(campaigns, totalPlayers, nowUtc) {
+function buildAllActivePlanetRows(campaigns, totalPlayers, nowUtc, planetModifiers) {
   // Left in planet-index order here - sorting is applied at render time
   // (see sortActivePlanetRows/activeSortMode below) so switching the sort
   // control doesn't need a fresh fetch, just a re-render of the same data.
@@ -563,13 +605,15 @@ function buildAllActivePlanetRows(campaigns, totalPlayers, nowUtc) {
     // any planet not currently under an active event (most of them).
     const pace = getDefensePaceInfo(planet, progress, nowUtc);
     const resistanceRate = getResistanceRatePctPerHr(planet);
+    const modifierSet = planetModifiers ? planetModifiers.get(planet.index) : null;
+    const modifiers = modifierSet ? Array.from(modifierSet).sort() : [];
     return {
       index: planet.index, name: asciiSafe(planet.name), sector: asciiSafe(planet.sector), faction: progress.faction, percent: progress.percent,
       playerCount, playerPct,
       resistanceRate,
       trend: getPlanetTrend(planet.index, resistanceRate),
       conditionsText: asciiSafe(getPlanetConditionsText(planet)),
-      pace
+      pace, modifiers
     };
   });
 }
@@ -646,6 +690,33 @@ async function hd2Fetch(path, { timeoutMs = 15000, maxRetries = 2 } = {}) {
   }
 }
 
+// Planet modifiers (Jet Brigade, Hive World, etc.) live only in the RAW
+// passthrough endpoint - see the PLANET_MODIFIER_NAMES comment above for
+// why. Two sequential calls (current war id, then that war's status) since
+// the second needs the first's result. This is a purely optional
+// enhancement layered on top of the main assignments/planets/campaigns
+// fetch - a failure here (including a retry-exhausted one from hd2Fetch)
+// is caught HERE and degrades to "no modifier badges shown", not thrown
+// into the main Promise.all, so it can never turn a working page into an
+// error banner just because this one nice-to-have call failed.
+async function fetchPlanetModifiers() {
+  const modifiersByIndex = new Map(); // planet index -> Set<canonical modifier name>
+  try {
+    const warIdResp = await hd2Fetch("/raw/api/WarSeason/current/WarID");
+    const status = await hd2Fetch("/raw/api/WarSeason/" + warIdResp.id + "/Status");
+    (status.planetActiveEffects || []).forEach(pe => {
+      const name = PLANET_MODIFIER_NAMES[String(pe.galacticEffectId)];
+      if (!name) return; // not in our curated list (flavor/infrastructure effect, or a new one not yet catalogued) - skip rather than show a raw id
+      let set = modifiersByIndex.get(pe.index);
+      if (!set) { set = new Set(); modifiersByIndex.set(pe.index, set); }
+      set.add(name);
+    });
+  } catch (e) {
+    console.warn("HD2 dashboard: could not fetch planet modifiers (non-fatal, badges just won't show)", e);
+  }
+  return modifiersByIndex;
+}
+
 // --- Cache: don't refetch more often than CONFIG.cacheSeconds regardless --
 // --- of how often the refresh loop/button asks - a courtesy to the shared -
 // --- community API's rate limit, same idea as the old server-side page's --
@@ -661,10 +732,11 @@ async function updateCache(force) {
   if (refreshing) return;
   refreshing = true;
   try {
-    const [assignments, planets, campaigns] = await Promise.all([
+    const [assignments, planets, campaigns, planetModifiers] = await Promise.all([
       hd2Fetch("/api/v1/assignments"),
       hd2Fetch("/api/v1/planets"),
-      hd2Fetch("/api/v1/campaigns")
+      hd2Fetch("/api/v1/campaigns"),
+      fetchPlanetModifiers()
     ]);
     cacheError = null;
 
@@ -694,7 +766,7 @@ async function updateCache(force) {
     const nowMs = Date.now();
     campaigns.forEach(c => recordPlanetHistory(c.planet.index, getPlanetProgress(c.planet).percent, nowMs));
     savePlanetHistory();
-    const allActivePlanetRows = buildAllActivePlanetRows(campaigns, totalPlayers, nowUtc);
+    const allActivePlanetRows = buildAllActivePlanetRows(campaigns, totalPlayers, nowUtc, planetModifiers);
 
     cache = { generatedAt: nowUtc, hasMajorOrder, majorOrder, strategicOpportunities, defendRows, allActivePlanetRows, totalPlayers };
     cacheAtMs = Date.now();
@@ -829,8 +901,16 @@ function activePlanetRowHtml(row) {
       '<div class="ap-status ' + row.pace.paceCls + '">' + escapeHtml(row.pace.paceStatus) + ' - ' + escapeHtml(row.pace.timeLeftText) + '</div>';
   }
 
+  // Notable enemy-force/environmental modifiers (Jet Brigade, Hive World,
+  // etc. - Anthony's request; see the PLANET_MODIFIER_NAMES comment for
+  // where this data actually comes from). Most planets have none.
+  const modifiersHtml = (row.modifiers && row.modifiers.length > 0)
+    ? '<div class="mod-row">' + row.modifiers.map(m => '<span class="mod-badge">' + escapeHtml(m) + '</span>').join("") + '</div>'
+    : "";
+
   return '<div class="ap-row">' +
     '<div class="row-top">' + badgeHtml(row.faction, factionIcon) + '<span class="row-label">' + escapeHtml(row.name) + '</span><span class="row-pct">' + row.percent + '%</span></div>' +
+    modifiersHtml +
     barHtml(row.percent, factionColorHex(row.faction), 14) +
     defenseHtml +
     '<div class="ap-meta"><span>' + escapeHtml(diversText) + '</span><span>' + escapeHtml(resistanceText) + '</span></div>' +
