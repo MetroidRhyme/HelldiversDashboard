@@ -68,6 +68,22 @@ h1 { font-size:22px; color:#e8b923; margin:4px 0 2px 0; letter-spacing:0.5px; }
 .dss-action-name { font-size:14px; font-weight:700; color:#e8b923; margin-bottom:3px; letter-spacing:0.3px; }
 .footer { font-size:11.5px; color:#666670; text-align:center; margin-top:6px; line-height:1.5; overflow-wrap:break-word; }
 .footer a { color:#787882; }
+/* Mobile default: one stacked column (this is the primary, "check it from
+   your phone" layout this project was built for - see the skill doc). The
+   3-column desktop layout below is a pure enhancement above the breakpoint,
+   never the only way this page works. */
+.layout { width:100%; }
+.col { min-width:0; }
+@media (min-width: 900px) {
+  /* Desktop/tablet-landscape only: DSS gets its own side panel, Major
+     Order + Planets Under Attack share the other side panel, and All
+     Active Planets - the longest, most-scrolled list - takes the center
+     column so it gets the most horizontal room. 900px sits above every
+     common phone width (including landscape) and most tablet portrait
+     widths, so a phone never sees this. */
+  body { max-width:1360px; padding-left:24px; padding-right:24px; }
+  .layout { display:grid; grid-template-columns: minmax(260px,320px) minmax(0,1fr) minmax(260px,320px); align-items:start; gap:0 20px; }
+}
 </style>
 </head>
 <body>
@@ -77,7 +93,11 @@ h1 { font-size:22px; color:#e8b923; margin:4px 0 2px 0; letter-spacing:0.5px; }
   <button class="refresh-btn" id="refresh-btn" type="button">Refresh</button>
 </div>
 <div id="banner"></div>
-<div id="sections"><p class="empty">Loading live data...</p></div>
+<div class="layout">
+  <div class="col" id="col-major"><p class="empty">Loading live data...</p></div>
+  <div class="col" id="col-planets"></div>
+  <div class="col" id="col-dss"></div>
+</div>
 <div class="footer">
   Data: api.helldivers2.dev (community, unofficial), fetched live by your browser - nothing runs on a server for this page.<br>
   Task-to-planet mapping and blocked/prereq detection are best-effort heuristics, not documented API fields.<br>
@@ -1127,13 +1147,21 @@ function activePlanetsSectionHtml(rows) {
 
 function render() {
   const bannerEl = document.getElementById("banner");
-  const sectionsEl = document.getElementById("sections");
+  // Three independent columns, not one shared feed - see the .layout/.col
+  // CSS above: on desktop (900px+) these lay out as side-by-side panels
+  // (DSS | All Active Planets | Major Order+Defense), on mobile they just
+  // stack top to bottom in this same DOM order (Anthony's request - desktop
+  // gets the 3-panel layout, phones keep the single stacked column this
+  // project was originally built for).
+  const majorEl = document.getElementById("col-major");
+  const planetsEl = document.getElementById("col-planets");
+  const dssEl = document.getElementById("col-dss");
   const updatedEl = document.getElementById("updated-text");
 
   if (cacheError && !cache) {
     updatedEl.textContent = "Could not reach the data source yet.";
     bannerEl.innerHTML = '<div class="banner">' + escapeHtml(cacheError) + ' - retrying automatically...</div>';
-    sectionsEl.innerHTML = "";
+    majorEl.innerHTML = ""; planetsEl.innerHTML = ""; dssEl.innerHTML = "";
     return;
   }
   if (!cache) return;
@@ -1145,18 +1173,22 @@ function render() {
     bannerEl.innerHTML = "";
   }
 
-  const sections = [];
+  const majorSections = [];
   if (cache.hasMajorOrder) {
-    sections.push(assignmentSectionHtml(cache.majorOrder, "MAJOR ORDER"));
-    cache.strategicOpportunities.forEach(so => sections.push(assignmentSectionHtml(so, "STRATEGIC OPPORTUNITY")));
+    majorSections.push(assignmentSectionHtml(cache.majorOrder, "MAJOR ORDER"));
+    cache.strategicOpportunities.forEach(so => majorSections.push(assignmentSectionHtml(so, "STRATEGIC OPPORTUNITY")));
   } else {
-    sections.push('<section class="card"><div class="card-label">MAJOR ORDER</div><p class="empty">No active Major Order right now.</p></section>');
+    majorSections.push('<section class="card"><div class="card-label">MAJOR ORDER</div><p class="empty">No active Major Order right now.</p></section>');
   }
-  const dssHtml = dssSectionHtml(cache.dssInfo);
-  if (dssHtml) sections.push(dssHtml);
-  sections.push(defendSectionHtml(cache.defendRows));
-  sections.push(activePlanetsSectionHtml(cache.allActivePlanetRows));
-  sectionsEl.innerHTML = sections.join("\n");
+  majorSections.push(defendSectionHtml(cache.defendRows));
+  majorEl.innerHTML = majorSections.join("\n");
+
+  planetsEl.innerHTML = activePlanetsSectionHtml(cache.allActivePlanetRows);
+
+  // Degrades quietly (empty column, no placeholder card) when there's no
+  // station data - same "omit rather than show an empty/error card" pattern
+  // dssSectionHtml itself already follows internally.
+  dssEl.innerHTML = dssSectionHtml(cache.dssInfo);
 
   updatedEl.textContent = "Updated " + cache.generatedAt.toLocaleTimeString() + " - refreshes every 60s";
 }
