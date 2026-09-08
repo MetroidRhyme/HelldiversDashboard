@@ -16,6 +16,7 @@ h1 { font-size:22px; color:#e8b923; margin:4px 0 2px 0; letter-spacing:0.5px; }
 .card { background:#181b22; border:1px solid #2a2e38; border-radius:12px; padding:16px 16px 18px 16px; margin-bottom:16px; width:100%; }
 .card-label { font-size:12px; font-weight:700; letter-spacing:1.5px; color:#9a9aa4; margin-bottom:6px; }
 .card-title { font-size:20px; color:#e8b923; margin:0 0 8px 0; line-height:1.25; overflow-wrap:break-word; }
+.description { font-size:15px; font-weight:600; color:#e8e8ec; margin:0 0 8px 0; line-height:1.4; overflow-wrap:break-word; }
 .briefing { font-size:14px; color:#c4c4cc; margin:0 0 10px 0; line-height:1.4; overflow-wrap:break-word; }
 .meta-row { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px 14px; font-size:13px; color:#9a9aa4; margin-bottom:12px; }
 .reward { color:#e8b923; font-weight:700; }
@@ -450,6 +451,12 @@ function buildAssignmentRows(assignment, planetsByIndex, campaigns) {
 
   return {
     title: asciiSafe(assignment.title),
+    // "description" is a distinct API field from "briefing" - per the OpenAPI
+    // spec, briefing is "a long form description... usually contains context"
+    // (the flavor-text paragraph, already rendered below) and description is
+    // "a very short summary" (the plain-language objective line, e.g. "Liberate
+    // the following planets"). Both can legitimately be null on a given order.
+    description: asciiSafe(assignment.description),
     briefing: asciiSafe(assignment.briefing),
     rewardAmount: (assignment.reward && assignment.reward.amount) ? assignment.reward.amount : null,
     expirationUtc,
@@ -970,6 +977,7 @@ function assignmentSectionHtml(assignment, label) {
   return '<section class="card">' +
     '<div class="card-label">' + escapeHtml(label) + '</div>' +
     '<h2 class="card-title">' + escapeHtml(assignment.title) + '</h2>' +
+    (assignment.description ? '<p class="description">' + escapeHtml(assignment.description) + '</p>' : '') +
     '<p class="briefing">' + escapeHtml(assignment.briefing) + '</p>' +
     '<div class="meta-row">' + rewardHtml + '<span class="expiry">' + escapeHtml(expText) + '</span></div>' +
     '<div class="overall"><span class="overall-pct">' + overallText + '</span>' +
