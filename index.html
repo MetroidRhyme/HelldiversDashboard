@@ -674,10 +674,20 @@ function buildAllActivePlanetRows(campaigns, totalPlayers, nowUtc, planetModifie
     const modifierSet = planetModifiers ? planetModifiers.get(planet.index) : null;
     const modifiers = modifierSet ? Array.from(modifierSet).sort() : [];
     // Region (town/city) breakdown - also already present on the plain
-    // planets payload, just never read before. Most planets have 0 or 1
-    // regions (nothing to add over the planet-level percent already
-    // shown); only worth surfacing when there's a real breakdown to show.
-    const regions = (planet.regions && planet.regions.length > 1) ? planet.regions : [];
+    // planets payload, just never read before. Originally gated to 2+
+    // regions on the assumption a single region "adds nothing over the
+    // planet-level percent already shown" - WRONG: a planet's own health
+    // can (and regularly does) stay completely flat at maxHealth while its
+    // one gating region is being actively cleared, since planet-level
+    // liberation doesn't move until the region(s) under it are captured.
+    // Confirmed live 2026-09-08 on CHARBAL-VII: planet health sat at
+    // exactly 2,000,000/2,000,000 for 17+ hours of history.db snapshots
+    // despite player count climbing past 28,000, while its one region
+    // (UTOPIA VAREN) measurably dropped between two live polls minutes
+    // apart - the single-region filter was hiding the entire explanation
+    // for "many divers, 0% progress". Now shown whenever there's at least
+    // one region, so that story is visible instead of silently dropped.
+    const regions = (planet.regions && planet.regions.length > 0) ? planet.regions : [];
     const pressureFronts = attackPressureMap ? (attackPressureMap.get(planet.index) || []) : [];
     return {
       index: planet.index, name: asciiSafe(planet.name), sector: asciiSafe(planet.sector), faction: progress.faction, percent: progress.percent,
@@ -1057,11 +1067,13 @@ function dssSectionHtml(dssInfo) {
     '</section>';
 }
 
-// Region (town/city) breakdown for a planet with more than one named
-// region - see buildAllActivePlanetRows. Skipped entirely for the ~70% of
-// planets that only have 0-1 regions (nothing to add there).
+// Region (town/city) breakdown for a planet with at least one named region -
+// see buildAllActivePlanetRows for why even a single region is worth
+// showing (planet-level percent can sit completely flat while its one
+// gating region has real, moving progress). Skipped only for planets with
+// no region data at all.
 function regionsHtml(regions) {
-  if (!regions || regions.length < 2) return "";
+  if (!regions || regions.length < 1) return "";
   const items = regions.map(r => {
     const pct = (r.maxHealth > 0) ? round1(100 * (r.maxHealth - r.health) / r.maxHealth) : 0;
     const availText = r.isAvailable ? "" : " - not yet open for missions";
