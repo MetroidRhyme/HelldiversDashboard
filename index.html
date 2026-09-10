@@ -1075,8 +1075,19 @@ function dssSectionHtml(dssInfo) {
 function regionsHtml(regions) {
   if (!regions || regions.length < 1) return "";
   const items = regions.map(r => {
-    const pct = (r.maxHealth > 0) ? round1(100 * (r.maxHealth - r.health) / r.maxHealth) : 0;
-    const availText = r.isAvailable ? "" : " - not yet open for missions";
+    // A captured region's health resets to full and isAvailable flips false -
+    // the same "health resets to full on completion" quirk this project
+    // already documented for whole planets (see getPlanetProgress), just
+    // never confirmed at the region level until Anthony caught it live on
+    // UTOPIA VAREN/CHARBAL-VII 2026-09-10: health sat at exactly maxHealth
+    // with isAvailable:false right after he'd personally helped liberate it -
+    // not "not yet started," already done. Nothing in the API distinguishes
+    // that from a genuinely not-yet-unlocked region (both read identically:
+    // full health, isAvailable:false) - treating full-health+unavailable as
+    // "liberated" per that live confirmation, not a proven general rule.
+    const likelyLiberated = !r.isAvailable && r.health >= r.maxHealth;
+    const pct = likelyLiberated ? 100 : ((r.maxHealth > 0) ? round1(100 * (r.maxHealth - r.health) / r.maxHealth) : 0);
+    const availText = likelyLiberated ? " - liberated" : (r.isAvailable ? "" : " - not yet open for missions");
     return '<div class="region-row"><span class="region-name">' + escapeHtml(r.name) + ' (' + escapeHtml(r.size) + ')</span>' +
       '<span class="region-meta">' + fmtNum(r.players) + ' divers - ' + pct + '% cleared' + escapeHtml(availText) + '</span></div>';
   }).join("");
